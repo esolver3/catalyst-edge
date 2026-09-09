@@ -2,6 +2,10 @@
 
 Catalyst Edge is an explainable market-signal engine built for the 2026 CoinMarketCap API Hackathon. It turns live CMC market data into ranked, short-duration research setups with transparent risk levels and factor-by-factor scoring.
 
+## Live demo
+
+[Open Catalyst Edge](https://catalyst-edge.saptael.chatgpt.site)
+
 ## What it does
 
 - Pulls the top 100 cryptoassets and global market metrics from CoinMarketCap.
@@ -25,6 +29,14 @@ Requests run server-side and are cached for 60 seconds. A keyed Startup-tier int
 The model combines weighted 1-hour, 24-hour and 7-day momentum; volume-to-market-cap turnover; directional agreement across periods; and agreement with the global market-cap regime. The score is deterministic and every component is visible in the interface.
 
 This is decision-support research, not financial advice or a claim of guaranteed returns.
+
+## Judge walkthrough
+
+1. Confirm the **CMC LIVE** status and UTC refresh time in the header.
+2. Compare the ranked long and short setups generated from live CMC data.
+3. Select an asset to inspect its entry band, target, invalidation and model risk.
+4. Review the momentum, liquidity, trend-alignment and market-regime factors behind its score.
+5. Verify the two CoinMarketCap endpoints in the **API evidence** panel.
 
 ## Local development
 
