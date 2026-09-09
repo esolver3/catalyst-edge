@@ -49,4 +49,4 @@ npm run dev
 
 ## Hackathon track
 
-AI Agents and Automation
+Markets and Trading Tools
