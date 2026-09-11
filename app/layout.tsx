@@ -2,11 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Catalyst Edge | Market Intelligence",
-  description: "CMC-powered market catalyst and risk-scored trade intelligence.",
-  other: {
-    "codex-preview": "development",
-  },
+  title: "Catalyst Edge | Explainable Crypto Market Signals",
+  description:
+    "Live CoinMarketCap data transformed into ranked, explainable crypto research setups with transparent risk levels.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
