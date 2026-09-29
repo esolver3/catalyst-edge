@@ -55,6 +55,8 @@ type Payload = {
   signals: Signal[];
   endpoints: string[];
   message?: string;
+  stale?: boolean;
+  warning?: string;
 };
 const fallback: Signal = {
   id: 1,
@@ -149,9 +151,17 @@ export default function Home() {
         </div>
         <div className="market-status">
           <i className={error ? "offline" : ""} />{" "}
-          {error ? "CMC DEGRADED" : data ? "CMC LIVE" : "CONNECTING"}{" "}
+          {error
+            ? "CMC DEGRADED"
+            : data?.stale
+              ? "CMC VERIFIED CACHE"
+              : data
+                ? "CMC LIVE"
+                : "CONNECTING"}{" "}
           <span>•</span>{" "}
-          {verified ? "2 VERIFIED ENDPOINTS" : "AWAITING VERIFICATION"}{" "}
+          {verified
+            ? `${data?.endpoints.length ?? 0} VERIFIED ENDPOINTS`
+            : "AWAITING VERIFICATION"}{" "}
           <b>{time} UTC</b>
         </div>
         <div className="header-actions">
@@ -405,7 +415,9 @@ export default function Home() {
             <span className={`source-btn ${verified ? "" : "unverified"}`}>
               <CircleDollarSign size={15} />{" "}
               {verified
-                ? "Verified · 60s cache"
+                ? data?.stale
+                  ? "Verified snapshot · live retrying"
+                  : "Verified · 5 min resilient cache"
                 : error
                   ? "Degraded"
                   : "Connecting"}

@@ -27,7 +27,7 @@ The public prototype uses CMC's keyless public API so judges can run it without 
 - `GET /public-api/v1/cryptocurrency/listings/latest`
 - `GET /public-api/v1/global-metrics/quotes/latest`
 
-Requests run server-side and use a 60-second shared cache. A keyed Startup-tier integration can replace the base URL without exposing the key to the browser.
+Requests run server-side with a five-minute resilient shared cache, coalesced refreshes, 429 retries, and an honest last-verified snapshot fallback. A keyed Startup-tier integration can replace the base URL without exposing the key to the browser.
 
 ## Architecture
 

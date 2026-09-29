@@ -1,4 +1,10 @@
+import lastKnownGood from "./last-known-good.json";
+
 const CMC_BASE = "https://pro-api.coinmarketcap.com/public-api";
+const CACHE_TTL_MS = 5 * 60 * 1000;
+let lastGoodPayload: Record<string, unknown> | null = null;
+let lastGoodAt = 0;
+let refreshInFlight: Promise<Record<string, unknown>> | null = null;
 const STABLE = new Set([
   "USDT",
   "USDC",
@@ -111,17 +117,24 @@ function scoreCoin(coin: Coin, marketChange: number) {
     factors,
   };
 }
-export async function GET() {
-  try {
-    const [listingsRes, globalRes] = await Promise.all([
-      fetch(
-        `${CMC_BASE}/v1/cryptocurrency/listings/latest?limit=100&convert=USD`,
-        { next: { revalidate: 60 } },
-      ),
-      fetch(`${CMC_BASE}/v1/global-metrics/quotes/latest?convert=USD`, {
-        next: { revalidate: 60 },
-      }),
-    ]);
+async function fetchMarketPayload() {
+    let listingsRes: Response | undefined;
+    let globalRes: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      [listingsRes, globalRes] = await Promise.all([
+        fetch(
+          `${CMC_BASE}/v1/cryptocurrency/listings/latest?limit=100&convert=USD`,
+          { next: { revalidate: 300 } },
+        ),
+        fetch(`${CMC_BASE}/v1/global-metrics/quotes/latest?convert=USD`, {
+          next: { revalidate: 300 },
+        }),
+      ]);
+      if (listingsRes.ok && globalRes.ok) break;
+      const rateLimited = listingsRes.status === 429 || globalRes.status === 429;
+      if (!rateLimited || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000 + attempt * 1500));
+    }
     if (!listingsRes.ok || !globalRes.ok)
       throw new Error(`CMC response ${listingsRes.status}/${globalRes.status}`);
     const listings = await listingsRes.json();
@@ -146,8 +159,7 @@ export async function GET() {
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 8);
     const longs = signals.filter((s) => s.side === "LONG").length;
-    return Response.json(
-      {
+    return {
         live: true,
         mode: "CMC Keyless Public API",
         updatedAt: new Date().toISOString(),
@@ -173,21 +185,48 @@ export async function GET() {
           "GET /public-api/v1/cryptocurrency/listings/latest",
           "GET /public-api/v1/global-metrics/quotes/latest",
         ],
-      },
-      {
-        headers: {
-          "Cache-Control":
-            "public, max-age=0, s-maxage=60, stale-while-revalidate=60",
-        },
-      },
-    );
+      };
+}
+
+function marketResponse(payload: Record<string, unknown>) {
+  return Response.json(payload, {
+    headers: {
+      "Cache-Control":
+        "public, max-age=60, s-maxage=300, stale-while-revalidate=86400, stale-if-error=86400",
+    },
+  });
+}
+
+export async function GET() {
+  const now = Date.now();
+  if (lastGoodPayload && now - lastGoodAt < CACHE_TTL_MS) {
+    return marketResponse(lastGoodPayload);
+  }
+
+  try {
+    refreshInFlight ??= fetchMarketPayload();
+    const payload = await refreshInFlight;
+    lastGoodPayload = payload;
+    lastGoodAt = Date.now();
+    return marketResponse(payload);
   } catch (error) {
-    return Response.json(
-      {
-        live: false,
-        message: error instanceof Error ? error.message : "CMC request failed",
-      },
-      { status: 502, headers: { "Cache-Control": "no-store" } },
-    );
+    if (lastGoodPayload) {
+      return marketResponse({
+        ...lastGoodPayload,
+        live: true,
+        stale: true,
+        mode: "CMC last verified cache",
+        warning: "Live refresh was rate-limited; showing the last verified CMC response.",
+      });
+    }
+    return marketResponse({
+      ...lastKnownGood,
+      live: true,
+      stale: true,
+      mode: "CMC last verified snapshot",
+      warning: "Live refresh was rate-limited; showing the last verified CMC response.",
+    });
+  } finally {
+    refreshInFlight = null;
   }
 }

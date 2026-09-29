@@ -28,7 +28,7 @@ Catalyst Edge is decision-support research, not financial advice, an execution v
 - `GET /public-api/v1/cryptocurrency/listings/latest`
 - `GET /public-api/v1/global-metrics/quotes/latest`
 
-Requests run server-side, never expose a key to the browser, and use a 60-second shared cache. The public prototype uses CoinMarketCap's keyless public surface so judges can open it without credentials. A production deployment can replace the base URL with the participant's server-side Startup-tier API configuration.
+Requests run server-side, never expose a key to the browser, and use a five-minute resilient shared cache with coalesced refreshes, 429 retries, and a last-verified snapshot fallback. The public prototype uses CoinMarketCap's keyless public surface so judges can open it without credentials. A production deployment can replace the base URL with the participant's server-side Startup-tier API configuration.
 
 ### Technical architecture
 
@@ -81,4 +81,4 @@ These items live outside the repository and must be confirmed on DoraHacks befor
 - Signals are deterministic research outputs, not backtested performance claims.
 - The paper list is browser-local and does not track fills, P&L, or execution.
 - The keyless public CMC surface is narrower than a full Startup-tier integration.
-- Data refreshes on a 60-second cache rather than tick-by-tick.
+- Data refreshes on a five-minute resilient cache rather than tick-by-tick.
