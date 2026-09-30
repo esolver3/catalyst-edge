@@ -11,3 +11,8 @@ export function getDb() {
 
   return drizzle(env.DB, { schema });
 }
+
+export function getMarketStore() {
+  if (!env.DB) throw new Error("Market persistence unavailable");
+  return env.DB;
+}

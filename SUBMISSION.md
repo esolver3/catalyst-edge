@@ -25,10 +25,10 @@ Catalyst Edge is decision-support research, not financial advice, an execution v
 
 ### CoinMarketCap integration
 
-- `GET /public-api/v1/cryptocurrency/listings/latest`
-- `GET /public-api/v1/global-metrics/quotes/latest`
+- `GET /v1/cryptocurrency/listings/latest`
+- `GET /v1/global-metrics/quotes/latest`
 
-Requests run server-side, never expose a key to the browser, and use a five-minute resilient shared cache with coalesced refreshes, 429 retries, and a last-verified snapshot fallback. The public prototype uses CoinMarketCap's keyless public surface so judges can open it without credentials. A production deployment can replace the base URL with the participant's server-side Startup-tier API configuration.
+Requests use the participant's authenticated CMC Startup API, with `CMC_API_KEY` held only in hosted secret settings. Judges need no credentials. A shared D1 snapshot and atomic refresh lease coordinate all server instances. Timeouts, bounded backoff, and source timestamp validation protect the latest successful response. Failed refreshes retain that durable response without reverting to an embedded historical snapshot. Cached and stale data are labeled accurately, and the dashboard polls every 30 seconds while visible.
 
 ### Technical architecture
 
@@ -80,5 +80,5 @@ These items live outside the repository and must be confirmed on DoraHacks befor
 
 - Signals are deterministic research outputs, not backtested performance claims.
 - The paper list is browser-local and does not track fills, P&L, or execution.
-- The keyless public CMC surface is narrower than a full Startup-tier integration.
+- Production uses the authenticated Startup API; availability still depends on CMC and the account quota.
 - Data refreshes on a five-minute resilient cache rather than tick-by-tick.

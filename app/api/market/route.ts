@@ -1,10 +1,9 @@
-import lastKnownGood from "./last-known-good.json";
+import { env } from "cloudflare:workers";
+import { getMarketStore } from "../../../db";
+import { readMarket, marketStatus } from "../../../lib/market-cache";
 
 const CMC_BASE = "https://pro-api.coinmarketcap.com/public-api";
-const CACHE_TTL_MS = 5 * 60 * 1000;
-let lastGoodPayload: Record<string, unknown> | null = null;
-let lastGoodAt = 0;
-let refreshInFlight: Promise<Record<string, unknown>> | null = null;
+const CMC_DATA_BASE = "https://api.coinmarketcap.com/data-api/v3";
 const STABLE = new Set([
   "USDT",
   "USDC",
@@ -25,6 +24,7 @@ type Quote = {
   percent_change_1h: number;
   percent_change_24h: number;
   percent_change_7d: number;
+  last_updated?: string;
 };
 type Coin = {
   id: number;
@@ -32,6 +32,22 @@ type Coin = {
   symbol: string;
   cmc_rank: number;
   quote: { USD: Quote };
+};
+type PublicCoin = {
+  id: number;
+  name: string;
+  symbol: string;
+  cmcRank: number;
+  quotes: Array<{
+    name: string;
+    price: number;
+    volume24h: number;
+    marketCap: number;
+    percentChange1h: number;
+    percentChange24h: number;
+    percentChange7d: number;
+    lastUpdated?: string;
+  }>;
 };
 const clamp = (n: number, min: number, max: number) =>
   Math.max(min, Math.min(max, n));
@@ -117,35 +133,22 @@ function scoreCoin(coin: Coin, marketChange: number) {
     factors,
   };
 }
-async function fetchMarketPayload() {
-    let listingsRes: Response | undefined;
-    let globalRes: Response | undefined;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      [listingsRes, globalRes] = await Promise.all([
-        fetch(
-          `${CMC_BASE}/v1/cryptocurrency/listings/latest?limit=100&convert=USD`,
-          { next: { revalidate: 300 } },
-        ),
-        fetch(`${CMC_BASE}/v1/global-metrics/quotes/latest?convert=USD`, {
-          next: { revalidate: 300 },
-        }),
-      ]);
-      if (listingsRes.ok && globalRes.ok) break;
-      const rateLimited = listingsRes.status === 429 || globalRes.status === 429;
-      if (!rateLimited || attempt === 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 1000 + attempt * 1500));
-    }
-    if (!listingsRes.ok || !globalRes.ok)
-      throw new Error(`CMC response ${listingsRes.status}/${globalRes.status}`);
-    const listings = await listingsRes.json();
-    const global = await globalRes.json();
-    if (!Array.isArray(listings?.data) || !global?.data?.quote?.USD)
-      throw new Error("CMC returned an unexpected payload");
-    const g = global.data;
-    const marketChange = Number(
-      g.quote.USD.total_market_cap_yesterday_percentage_change ?? 0,
-    );
-    const signals = (listings.data as Coin[])
+function buildPayload(
+  coins: Coin[],
+  globalData: any,
+  mode: string,
+  endpoints: string[],
+) {
+  const g = globalData;
+  const quote =
+    g.quote?.USD ?? g.quotes?.find((item: any) => item.cryptoId === 2781);
+  if (!quote) throw new Error("CMC returned no USD global quote");
+  const marketChange = Number(
+    quote.total_market_cap_yesterday_percentage_change ??
+      quote.totalMarketCapYesterdayPercentageChange ??
+      0,
+  );
+  const signals = coins
       .filter((c) => {
         const q = c.quote?.USD;
         return (
@@ -158,75 +161,157 @@ async function fetchMarketPayload() {
       .map((c) => scoreCoin(c, marketChange))
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 8);
-    const longs = signals.filter((s) => s.side === "LONG").length;
-    return {
-        live: true,
-        mode: "CMC Keyless Public API",
-        updatedAt: new Date().toISOString(),
-        regime: {
-          label: marketChange >= 0 ? "RISK-ON" : "RISK-OFF",
-          score: Math.round(clamp(50 + Math.abs(marketChange) * 8, 50, 92)),
-          marketChange: Number(marketChange.toFixed(2)),
-        },
-        global: {
-          marketCap: g.quote.USD.total_market_cap,
-          volume: g.quote.USD.total_volume_24h,
-          btcDominance: g.btc_dominance,
-          ethDominance: g.eth_dominance,
-        },
-        summary: {
-          active: signals.length,
-          longs,
-          shorts: signals.length - longs,
-          highConviction: signals.filter((s) => s.confidence >= 80).length,
-        },
-        signals,
-        endpoints: [
-          "GET /public-api/v1/cryptocurrency/listings/latest",
-          "GET /public-api/v1/global-metrics/quotes/latest",
-        ],
-      };
+  if (signals.length === 0 || signals.some((s) => !Number.isFinite(s.rawPrice) || s.rawPrice <= 0 || !Number.isFinite(s.confidence))) {
+    throw new Error("CMC returned unusable market quotes");
+  }
+  if (![quote.total_market_cap ?? quote.totalMarketCap, quote.total_volume_24h ?? quote.totalVolume24H, g.btc_dominance ?? g.btcDominance, g.eth_dominance ?? g.ethDominance, marketChange].every((x) => typeof x === "number" && Number.isFinite(x))) {
+    throw new Error("CMC returned invalid global metrics");
+  }
+  const sourceTimes = [quote.last_updated, ...coins.filter((c) => signals.some((s) => s.id === c.id)).map((c) => c.quote.USD.last_updated)].map((x) => Date.parse(x));
+  if (sourceTimes.some((x) => !Number.isFinite(x) || Date.now() - x > 20 * 60_000 || x > Date.now() + 60_000)) {
+    throw new Error("CMC source quotes are stale or missing timestamps");
+  }
+  const longs = signals.filter((s) => s.side === "LONG").length;
+  return {
+    live: true,
+    mode,
+    updatedAt: new Date().toISOString(),
+    sourceAsOf: new Date(Math.min(...sourceTimes)).toISOString(),
+    regime: {
+      label: marketChange >= 0 ? "RISK-ON" : "RISK-OFF",
+      score: Math.round(clamp(50 + Math.abs(marketChange) * 8, 50, 92)),
+      marketChange: Number(marketChange.toFixed(2)),
+    },
+    global: {
+      marketCap: quote.total_market_cap ?? quote.totalMarketCap,
+      volume: quote.total_volume_24h ?? quote.totalVolume24H,
+      btcDominance: g.btc_dominance ?? g.btcDominance,
+      ethDominance: g.eth_dominance ?? g.ethDominance,
+    },
+    summary: {
+      active: signals.length,
+      longs,
+      shorts: signals.length - longs,
+      highConviction: signals.filter((s) => s.confidence >= 80).length,
+    },
+    signals,
+    endpoints,
+  };
 }
 
-function marketResponse(payload: Record<string, unknown>) {
+async function fetchKeylessPayload(apiKey?: string) {
+  const base = apiKey ? "https://pro-api.coinmarketcap.com" : CMC_BASE;
+  const headers: Record<string, string> = apiKey ? { "X-CMC_PRO_API_KEY": apiKey } : {};
+  const [listingsRes, globalRes] = await Promise.all([
+    fetch(`${base}/v1/cryptocurrency/listings/latest?limit=100&convert=USD`, {
+      cache: "no-store", signal: AbortSignal.timeout(10_000), headers,
+    }),
+    fetch(`${base}/v1/global-metrics/quotes/latest?convert=USD`, {
+      cache: "no-store", signal: AbortSignal.timeout(10_000), headers,
+    }),
+  ]);
+  if (!listingsRes.ok || !globalRes.ok) {
+    throw new Error(`CMC keyless response ${listingsRes.status}/${globalRes.status}`);
+  }
+  const listings: any = await listingsRes.json();
+  const global: any = await globalRes.json();
+  if (Number(listings?.status?.error_code) !== 0 || Number(global?.status?.error_code) !== 0) throw new Error("CMC application error");
+  if (!Array.isArray(listings?.data) || !global?.data?.quote?.USD) {
+    throw new Error("CMC keyless API returned an unexpected payload");
+  }
+  return buildPayload(
+    listings.data as Coin[],
+    global.data,
+    apiKey ? "CMC authenticated API" : "CMC Keyless Public API",
+    [
+      apiKey ? "GET /v1/cryptocurrency/listings/latest" : "GET /public-api/v1/cryptocurrency/listings/latest",
+      apiKey ? "GET /v1/global-metrics/quotes/latest" : "GET /public-api/v1/global-metrics/quotes/latest",
+    ],
+  );
+}
+
+async function fetchPublicDataPayload() {
+  const [listingsRes, globalRes] = await Promise.all([
+    fetch(
+      `${CMC_DATA_BASE}/cryptocurrency/listing?start=1&limit=100&sortBy=market_cap&sortType=desc&convert=USD&cryptoType=all&tagType=all&audited=false`,
+      { cache: "no-store", signal: AbortSignal.timeout(10_000) },
+    ),
+    fetch(`${CMC_DATA_BASE}/global-metrics/quotes/latest?convert=USD`, {
+      cache: "no-store", signal: AbortSignal.timeout(10_000),
+    }),
+  ]);
+  if (!listingsRes.ok || !globalRes.ok) {
+    throw new Error(`CMC data response ${listingsRes.status}/${globalRes.status}`);
+  }
+  const listings: any = await listingsRes.json();
+  const global: any = await globalRes.json();
+  if (Number(listings?.status?.error_code) !== 0 || Number(global?.status?.error_code) !== 0) throw new Error("CMC application error");
+  if (!Array.isArray(listings?.data?.cryptoCurrencyList) || !global?.data?.quotes) {
+    throw new Error("CMC public data API returned an unexpected payload");
+  }
+  const coins = (listings.data.cryptoCurrencyList as PublicCoin[]).map((coin) => {
+    const q = coin.quotes.find((quote) => quote.name === "USD") ?? coin.quotes[0];
+    return {
+      id: coin.id,
+      name: coin.name,
+      symbol: coin.symbol,
+      cmc_rank: coin.cmcRank,
+      quote: {
+        USD: {
+          price: q.price,
+          volume_24h: q.volume24h,
+          market_cap: q.marketCap,
+          percent_change_1h: q.percentChange1h,
+          percent_change_24h: q.percentChange24h,
+          percent_change_7d: q.percentChange7d,
+          last_updated: q.lastUpdated,
+        },
+      },
+    } satisfies Coin;
+  });
+  return buildPayload(
+    coins,
+    global.data,
+    "CMC Public Data API",
+    [
+      "GET /data-api/v3/cryptocurrency/listing",
+      "GET /data-api/v3/global-metrics/quotes/latest",
+    ],
+  );
+}
+
+async function fetchMarketPayload() {
+  const apiKey = (env as Cloudflare.Env).CMC_API_KEY;
+  if (apiKey) return fetchKeylessPayload(apiKey);
+  try {
+    return await fetchKeylessPayload();
+  } catch {
+    return fetchPublicDataPayload();
+  }
+}
+
+function marketResponse(payload: Record<string, unknown>, status = 200) {
   return Response.json(payload, {
-    headers: {
-      "Cache-Control":
-        "public, max-age=60, s-maxage=300, stale-while-revalidate=86400, stale-if-error=86400",
-    },
+    status,
+    headers: { "Cache-Control": "no-store, max-age=0", "CDN-Cache-Control": "no-store" },
   });
 }
 
 export async function GET() {
-  const now = Date.now();
-  if (lastGoodPayload && now - lastGoodAt < CACHE_TTL_MS) {
-    return marketResponse(lastGoodPayload);
-  }
-
   try {
-    refreshInFlight ??= fetchMarketPayload();
-    const payload = await refreshInFlight;
-    lastGoodPayload = payload;
-    lastGoodAt = Date.now();
-    return marketResponse(payload);
-  } catch (error) {
-    if (lastGoodPayload) {
-      return marketResponse({
-        ...lastGoodPayload,
-        live: true,
-        stale: true,
-        mode: "CMC last verified cache",
-        warning: "Live refresh was rate-limited; showing the last verified CMC response.",
-      });
+    const result = await readMarket(getMarketStore(), fetchMarketPayload);
+    if (!result.payload) {
+      return marketResponse({ live: false, status: "unavailable", message: result.refreshing ? "First market refresh is in progress. Retrying shortly." : "CMC is unavailable. Retrying shortly." }, 503);
     }
+    const status = marketStatus(result.payload, result.source);
     return marketResponse({
-      ...lastKnownGood,
-      live: true,
-      stale: true,
-      mode: "CMC last verified snapshot",
-      warning: "Live refresh was rate-limited; showing the last verified CMC response.",
+      ...result.payload,
+      ...status,
+      servedAt: new Date().toISOString(),
+      warning: status.stale ? "Live refresh is unavailable. Showing the latest saved CMC snapshot; these setups are stale." : undefined,
     });
-  } finally {
-    refreshInFlight = null;
+  } catch (error) {
+    console.error("Market persistence failed", error instanceof Error ? error.message : "Unknown failure");
+    return marketResponse({ live: false, status: "unavailable", message: "Market data storage is temporarily unavailable. Retrying shortly." }, 503);
   }
 }

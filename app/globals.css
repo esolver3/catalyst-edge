@@ -830,3 +830,9 @@ html {
   color: var(--amber);
   background: #211b0e;
 }
+
+.market-status { max-width: 46%; font-size: 12px; line-height: 1.5; }
+.market-status b { display: block; }
+.data-health { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 18px; font-size: 14px; color: #9bb0b6; }
+.data-health strong { color: #d5ebe3; }
+.data-health.down strong { color: #ff6688; }

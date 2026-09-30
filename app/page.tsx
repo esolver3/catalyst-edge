@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   CircleDollarSign,
@@ -38,7 +38,9 @@ type Signal = {
 };
 type Payload = {
   live: boolean;
+  status: "live" | "cached" | "stale" | "unavailable";
   updatedAt: string;
+  sourceAsOf?: string;
   regime: { label: string; score: number; marketChange: number };
   global: {
     marketCap: number;
@@ -96,23 +98,43 @@ export default function Home() {
   const [paperIds, setPaperIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const load = () => {
-    return fetch("/api/market")
-      .then((r) => r.json())
-      .then((p: Payload) => {
-        if (!p.live) throw new Error(p.message || "CMC unavailable");
-        setData(p);
-        setSelectedId((x) => x ?? p.signals[0]?.id ?? null);
-        setError("");
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  };
+  const [now, setNow] = useState(Date.now());
+  const requestInFlight = useRef(false);
+  const load = useCallback(async () => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
+    try {
+      const response = await fetch("/api/market", { cache: "no-store", signal: AbortSignal.timeout(30_000) });
+      const payload: Payload = await response.json();
+      if (!response.ok || !Array.isArray(payload.signals)) throw new Error(payload.message || "CMC unavailable");
+      setData((previous) => !previous || Date.parse(payload.updatedAt) >= Date.parse(previous.updatedAt) ? payload : previous);
+      setSelectedId((id) => id ?? payload.signals[0]?.id ?? null);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "CMC unavailable");
+    } finally {
+      requestInFlight.current = false;
+      setLoading(false);
+      setNow(Date.now());
+    }
+  }, []);
   const refresh = () => {
+    if (requestInFlight.current) return;
     setLoading(true);
     void load();
   };
-  useEffect(load, []);
+  useEffect(() => {
+    void load();
+    const poll = setInterval(() => { if (!document.hidden) void load(); }, 30_000);
+    const clock = setInterval(() => setNow(Date.now()), 1000);
+    const onVisible = () => { if (!document.hidden) void load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(poll);
+      clearInterval(clock);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load]);
   const visible = useMemo(
     () =>
       (data?.signals ?? []).filter(
@@ -126,10 +148,12 @@ export default function Home() {
     data?.signals.find((s) => s.id === selectedId) ??
     data?.signals[0] ??
     fallback;
-  const time = data?.updatedAt
-    ? new Date(data.updatedAt).toISOString().slice(11, 19)
-    : "—";
-  const verified = Boolean(data && !error);
+  const time = data?.updatedAt ? new Date(data.updatedAt).toISOString().replace("T", " ").slice(0, 19) : "—";
+  const age = data ? Math.max(0, now - Date.parse(data.updatedAt)) : 0;
+  const stale = Boolean(data && (data.stale || age >= 300_000 || (data.sourceAsOf && now - Date.parse(data.sourceAsOf) > 20 * 60_000)));
+  const live = Boolean(data?.live && !stale && !error);
+  const ageLabel = age < 60_000 ? `${Math.floor(age / 1000)}s old` : `${Math.floor(age / 60_000)}m old`;
+  const verified = Boolean(data);
   const inPaper = paperIds.includes(selected.id);
   const togglePaper = () =>
     setPaperIds(
@@ -150,19 +174,19 @@ export default function Home() {
           </div>
         </div>
         <div className="market-status">
-          <i className={error ? "offline" : ""} />{" "}
+          <i className={!live ? "offline" : ""} />{" "}
           {error
             ? "CMC DEGRADED"
-            : data?.stale
-              ? "CMC VERIFIED CACHE"
+            : stale
+              ? "CMC STALE CACHE"
               : data
-                ? "CMC LIVE"
+                ? live ? "CMC LIVE" : "CMC CACHED"
                 : "CONNECTING"}{" "}
           <span>•</span>{" "}
           {verified
-            ? `${data?.endpoints.length ?? 0} VERIFIED ENDPOINTS`
+            ? `${data?.endpoints.length ?? 0} SNAPSHOT ENDPOINTS`
             : "AWAITING VERIFICATION"}{" "}
-          <b>{time} UTC</b>
+          <b>Fetched {time} UTC{data ? ` · ${ageLabel}` : ""}</b>
         </div>
         <div className="header-actions">
           <span className="mode">PAPER LIST · {paperIds.length}</span>
@@ -192,7 +216,7 @@ export default function Home() {
             <div className="eyebrow">
               <Radio size={13} /> EXPLAINABLE SIGNAL ENGINE
             </div>
-            <h1>Trade setups, ranked by live evidence.</h1>
+            <h1>Trade setups, ranked by CMC evidence.</h1>
             <p>
               Every score is calculated from CMC momentum, liquidity, trend
               alignment and market regime.
@@ -211,9 +235,13 @@ export default function Home() {
             <small>{data?.regime.score ?? 0} / 100</small>
           </div>
         </div>
-        {error && (
+        {data && <div className={`data-health ${stale || error ? "down" : ""}`} role="status">
+          <strong>{error ? "Connection unavailable" : stale ? "Stale CMC snapshot" : live ? "Live CMC response" : "Cached CMC response"}</strong>
+          <span>Fetched {time} UTC · {ageLabel}</span>
+        </div>}
+        {(error || stale) && (
           <div className="error-banner">
-            Live CMC connection is retrying: {error}{" "}
+            Live CMC connection is retrying: {error || data?.warning || "The displayed snapshot is older than five minutes."}{" "}
             <button type="button" onClick={refresh}>Retry</button>
           </div>
         )}
@@ -263,15 +291,16 @@ export default function Home() {
                 <span>
                   {loading
                     ? "Calculating…"
-                    : error
-                      ? "Showing last verified result"
-                      : "Refreshed from CMC"}
+                    : stale || error
+                      ? "Showing stale snapshot"
+                      : live ? "Fetched from CMC" : "Saved CMC snapshot · refreshes every 30 seconds"}
                 </span>
               </div>
               <div className="filters">
                 <button
                   type="button"
                   onClick={refresh}
+                  disabled={loading}
                   aria-label="Refresh live market data"
                 >
                   <RefreshCw size={13} />
@@ -393,7 +422,7 @@ export default function Home() {
               type="button"
               className={`execute ${inPaper ? "added" : ""}`}
               onClick={togglePaper}
-              disabled={!data}
+              disabled={!data || stale || Boolean(error)}
             >
               <Target size={17} />{" "}
               {inPaper ? "REMOVE FROM PAPER LIST" : "ADD TO PAPER LIST"}
@@ -409,15 +438,15 @@ export default function Home() {
             <div>
               <h2>API evidence</h2>
               <span>
-                Connection status for the CMC data used in this result
+                {data?.sourceAsOf ? `CMC quotes as of ${new Date(data.sourceAsOf).toISOString().replace("T", " ").slice(0, 19)} UTC` : "Connection status for the CMC data used in this result"}
               </span>
             </div>
             <span className={`source-btn ${verified ? "" : "unverified"}`}>
               <CircleDollarSign size={15} />{" "}
               {verified
-                ? data?.stale
-                  ? "Verified snapshot · live retrying"
-                  : "Verified · 5 min resilient cache"
+                ? stale || error
+                  ? "Saved snapshot · live retrying"
+                  : live ? "Verified upstream response" : "Saved snapshot · within 5 minutes"
                 : error
                   ? "Degraded"
                   : "Connecting"}
@@ -436,12 +465,12 @@ export default function Home() {
                 <strong>{e}</strong>
               </div>
               <em className={verified ? "bullish" : "mixed"}>
-                {verified ? "HTTP 200" : "PENDING"}
+                {live ? "HTTP 200" : verified ? "SAVED RESPONSE" : "PENDING"}
               </em>
               <b>{i ? "Regime · dominance" : "Price · volume · rank"}</b>
               <div className="impact">
                 <i style={{ width: verified ? "100%" : "0%" }} />
-                <small>{verified ? "live" : "waiting"}</small>
+                <small>{live ? "live" : verified ? stale ? "stale" : "cached" : "waiting"}</small>
               </div>
             </div>
           ))}

@@ -22,12 +22,12 @@ This prototype demonstrates explainable market screening. It is not an execution
 
 ## CoinMarketCap API use
 
-The public prototype uses CMC's keyless public API so judges can run it without secrets:
+Production uses the account's authenticated CMC Startup API. `CMC_API_KEY` is stored only as a secret in the hosted runtime; judges need no credentials:
 
-- `GET /public-api/v1/cryptocurrency/listings/latest`
-- `GET /public-api/v1/global-metrics/quotes/latest`
+- `GET /v1/cryptocurrency/listings/latest`
+- `GET /v1/global-metrics/quotes/latest`
 
-Requests run server-side with a five-minute resilient shared cache, coalesced refreshes, 429 retries, and an honest last-verified snapshot fallback. A keyed Startup-tier integration can replace the base URL without exposing the key to the browser.
+Requests run server-side with a five-minute D1 snapshot shared by all production instances. An atomic 45-second lease prevents simultaneous upstream refreshes; failures trigger bounded 30-second to five-minute backoff. Each upstream request has a ten-second timeout. When no runtime key is configured, a keyless/public Data API compatibility path is available. Production deliberately uses the authenticated API and retains the durable snapshot on credential/quota errors. Failed refreshes retain the newest durable snapshot. There is no embedded historical fallback. Invalid or empty data and source quotes over 20 minutes old are rejected. API responses disable browser/CDN caching, and the dashboard polls every 30 seconds while visible. Cached/stale responses never claim live endpoint evidence; fetched time and source quote time are displayed separately. No key is exposed to the browser or repository.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ Built with Next.js 16, React 19, TypeScript, Vinext/Vite, and Cloudflare Workers
 
 ## Judge walkthrough
 
-1. Confirm **CMC LIVE**, the UTC refresh time, and the verified endpoint count.
+1. Check **CMC LIVE**, **CMC CACHED**, or **CMC STALE CACHE**, the UTC fetched time, and source quote time.
 2. Compare the ranked setups and switch between **ALL**, **LONG**, and **SHORT**.
 3. Select an asset to inspect its entry, target, invalidation, and modeled loss.
 4. Review the momentum, liquidity, trend-alignment, and market-regime factors.
@@ -60,6 +60,8 @@ npm run dev
 ```
 
 Run a production build with `npm run build`.
+
+D1 binding `DB` and the generated `drizzle/` migrations are required. Deployment applies migrations before uploading the Worker. For local D1, apply the migration with Wrangler before requesting `/api/market`. Run `node --test tests/market-cache.test.mjs` for concurrency, cold-instance, outage, stale-response, lease-race, and recovery checks.
 
 ## Hackathon track
 
