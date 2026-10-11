@@ -1,0 +1,25 @@
+name: Agent Team Simulation
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 13 * * 1-5'
+permissions:
+  contents: read
+jobs:
+  simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test
+        run: python -m unittest agent_team.test_run
+      - name: Generate report
+        run: python -m agent_team.run
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-team-report
+          path: agent_team/output/report.json
+          retention-days: 7
