@@ -59,6 +59,8 @@ type Payload = {
   message?: string;
   stale?: boolean;
   warning?: string;
+  feedIssue?: { code: string; message: string; requiresOwnerAction: boolean };
+  nextRetryAt?: string;
 };
 const fallback: Signal = {
   id: 1,
@@ -98,6 +100,7 @@ export default function Home() {
   const [paperIds, setPaperIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [nextRetryAt, setNextRetryAt] = useState<string | undefined>();
   const [now, setNow] = useState(Date.now());
   const requestInFlight = useRef(false);
   const load = useCallback(async () => {
@@ -106,6 +109,7 @@ export default function Home() {
     try {
       const response = await fetch("/api/market", { cache: "no-store", signal: AbortSignal.timeout(30_000) });
       const payload: Payload = await response.json();
+      setNextRetryAt(payload.nextRetryAt);
       if (!response.ok || !Array.isArray(payload.signals)) throw new Error(payload.message || "CMC unavailable");
       setData((previous) => !previous || Date.parse(payload.updatedAt) >= Date.parse(previous.updatedAt) ? payload : previous);
       setSelectedId((id) => id ?? payload.signals[0]?.id ?? null);
@@ -241,8 +245,9 @@ export default function Home() {
         </div>}
         {(error || stale) && (
           <div className="error-banner">
-            Live CMC connection is retrying: {error || data?.warning || "The displayed snapshot is older than five minutes."}{" "}
-            <button type="button" onClick={refresh}>Retry</button>
+            {error || data?.warning || "The displayed snapshot is older than five minutes. Live updates will retry automatically."}{" "}
+            {nextRetryAt && Date.parse(nextRetryAt) > now && <span>Next automatic attempt after {new Date(nextRetryAt).toISOString().slice(11, 19)} UTC. </span>}
+            <button type="button" onClick={refresh} disabled={loading}>Check status</button>
           </div>
         )}
         <div className="stats">

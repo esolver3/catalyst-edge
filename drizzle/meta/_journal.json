@@ -8,6 +8,13 @@
       "when": 1790777816340,
       "tag": "0000_clear_wrecker",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1791897960440,
+      "tag": "0001_wealthy_naoko",
+      "breakpoints": true
     }
   ]
 }

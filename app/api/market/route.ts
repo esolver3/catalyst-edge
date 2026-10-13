@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getMarketStore } from "../../../db";
 import { readMarket, marketStatus } from "../../../lib/market-cache";
+import { readCmcResponse } from "../../../lib/market-errors";
 
 const CMC_BASE = "https://pro-api.coinmarketcap.com/public-api";
 const CMC_DATA_BASE = "https://api.coinmarketcap.com/data-api/v3";
@@ -199,8 +200,9 @@ function buildPayload(
   };
 }
 
-async function fetchKeylessPayload(apiKey?: string) {
+async function fetchProPayload(apiKey?: string) {
   const base = apiKey ? "https://pro-api.coinmarketcap.com" : CMC_BASE;
+  const source = apiKey ? "CMC authenticated API" : "CMC Keyless Public API";
   const headers: Record<string, string> = apiKey ? { "X-CMC_PRO_API_KEY": apiKey } : {};
   const [listingsRes, globalRes] = await Promise.all([
     fetch(`${base}/v1/cryptocurrency/listings/latest?limit=100&convert=USD`, {
@@ -210,19 +212,17 @@ async function fetchKeylessPayload(apiKey?: string) {
       cache: "no-store", signal: AbortSignal.timeout(10_000), headers,
     }),
   ]);
-  if (!listingsRes.ok || !globalRes.ok) {
-    throw new Error(`CMC keyless response ${listingsRes.status}/${globalRes.status}`);
-  }
-  const listings: any = await listingsRes.json();
-  const global: any = await globalRes.json();
-  if (Number(listings?.status?.error_code) !== 0 || Number(global?.status?.error_code) !== 0) throw new Error("CMC application error");
+  const [listings, global] = await Promise.all([
+    readCmcResponse<{data: Coin[]}>(listingsRes, source, "/v1/cryptocurrency/listings/latest"),
+    readCmcResponse<{data: {quote: {USD: Quote}}}>(globalRes, source, "/v1/global-metrics/quotes/latest"),
+  ]);
   if (!Array.isArray(listings?.data) || !global?.data?.quote?.USD) {
-    throw new Error("CMC keyless API returned an unexpected payload");
+    throw new Error("CMC API returned an unexpected payload");
   }
   return buildPayload(
     listings.data as Coin[],
     global.data,
-    apiKey ? "CMC authenticated API" : "CMC Keyless Public API",
+    source,
     [
       apiKey ? "GET /v1/cryptocurrency/listings/latest" : "GET /public-api/v1/cryptocurrency/listings/latest",
       apiKey ? "GET /v1/global-metrics/quotes/latest" : "GET /public-api/v1/global-metrics/quotes/latest",
@@ -240,12 +240,10 @@ async function fetchPublicDataPayload() {
       cache: "no-store", signal: AbortSignal.timeout(10_000),
     }),
   ]);
-  if (!listingsRes.ok || !globalRes.ok) {
-    throw new Error(`CMC data response ${listingsRes.status}/${globalRes.status}`);
-  }
-  const listings: any = await listingsRes.json();
-  const global: any = await globalRes.json();
-  if (Number(listings?.status?.error_code) !== 0 || Number(global?.status?.error_code) !== 0) throw new Error("CMC application error");
+  const [listings, global] = await Promise.all([
+    readCmcResponse<{data: {cryptoCurrencyList: PublicCoin[]}}>(listingsRes, "CMC Public Data API", "/data-api/v3/cryptocurrency/listing"),
+    readCmcResponse<{data: {quotes: object[]}}>(globalRes, "CMC Public Data API", "/data-api/v3/global-metrics/quotes/latest"),
+  ]);
   if (!Array.isArray(listings?.data?.cryptoCurrencyList) || !global?.data?.quotes) {
     throw new Error("CMC public data API returned an unexpected payload");
   }
@@ -282,9 +280,9 @@ async function fetchPublicDataPayload() {
 
 async function fetchMarketPayload() {
   const apiKey = (env as Cloudflare.Env).CMC_API_KEY;
-  if (apiKey) return fetchKeylessPayload(apiKey);
+  if (apiKey) return fetchProPayload(apiKey);
   try {
-    return await fetchKeylessPayload();
+    return await fetchProPayload();
   } catch {
     return fetchPublicDataPayload();
   }
@@ -300,15 +298,17 @@ function marketResponse(payload: Record<string, unknown>, status = 200) {
 export async function GET() {
   try {
     const result = await readMarket(getMarketStore(), fetchMarketPayload);
+    const health = { feedIssue: result.feedIssue, nextRetryAt: result.nextRetryAt, refreshing: result.refreshing };
     if (!result.payload) {
-      return marketResponse({ live: false, status: "unavailable", message: result.refreshing ? "First market refresh is in progress. Retrying shortly." : "CMC is unavailable. Retrying shortly." }, 503);
+      return marketResponse({ live: false, status: "unavailable", ...health, message: result.feedIssue?.message ?? (result.refreshing ? "First market refresh is in progress. Retrying shortly." : "CMC is unavailable. Retrying shortly.") }, 503);
     }
     const status = marketStatus(result.payload, result.source);
     return marketResponse({
       ...result.payload,
       ...status,
+      ...health,
       servedAt: new Date().toISOString(),
-      warning: status.stale ? "Live refresh is unavailable. Showing the latest saved CMC snapshot; these setups are stale." : undefined,
+      warning: status.stale ? `${result.feedIssue?.message ?? "Live refresh is unavailable."} Showing the latest saved CMC snapshot; these setups are stale.` : undefined,
     });
   } catch (error) {
     console.error("Market persistence failed", error instanceof Error ? error.message : "Unknown failure");

@@ -1,0 +1,1 @@
+ALTER TABLE `market_cache` ADD `refresh_error` text;

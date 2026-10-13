@@ -8,4 +8,5 @@ export const marketCache = sqliteTable("market_cache", {
   leaseUntil: integer("lease_until").notNull().default(0),
   retryAfter: integer("retry_after").notNull().default(0),
   failures: integer("failures").notNull().default(0),
+  refreshError: text("refresh_error"),
 });

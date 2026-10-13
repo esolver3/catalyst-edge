@@ -27,7 +27,11 @@ Production uses the account's authenticated CMC Startup API. `CMC_API_KEY` is st
 - `GET /v1/cryptocurrency/listings/latest`
 - `GET /v1/global-metrics/quotes/latest`
 
-Requests run server-side with a five-minute D1 snapshot shared by all production instances. An atomic 45-second lease prevents simultaneous upstream refreshes; failures trigger bounded 30-second to five-minute backoff. Each upstream request has a ten-second timeout. When no runtime key is configured, a keyless/public Data API compatibility path is available. Production deliberately uses the authenticated API and retains the durable snapshot on credential/quota errors. Failed refreshes retain the newest durable snapshot. There is no embedded historical fallback. Invalid or empty data and source quotes over 20 minutes old are rejected. API responses disable browser/CDN caching, and the dashboard polls every 30 seconds while visible. Cached/stale responses never claim live endpoint evidence; fetched time and source quote time are displayed separately. No key is exposed to the browser or repository.
+Requests run server-side with a five-minute D1 snapshot shared by all production instances. An atomic 45-second lease prevents simultaneous upstream refreshes and rechecks freshness before acquisition. Temporary failures trigger 30-second to five-minute backoff; inactive access, authentication, permission, and daily/monthly quota failures wait at least 15 minutes. Rate limits honor `Retry-After`. Each upstream request has a ten-second timeout. When no runtime key is configured, a keyless/public Data API compatibility path is available. Production uses the authenticated API and retains the newest durable snapshot on failure. There is no embedded historical fallback. Invalid or empty data and source quotes over 20 minutes old are rejected. API responses disable browser/CDN caching, and the dashboard polls every 30 seconds while visible. Cached/stale responses never claim live endpoint evidence; fetched time and source quote time are displayed separately. No key is exposed to the browser or repository.
+
+Refresh failures are saved separately from market data, so every instance reports the same safe `feedIssue` and `nextRetryAt`. The API records HTTP status and CMC's numeric error code without forwarding raw upstream messages or secrets. The dashboard shows the reason and cooldown, and stale data cannot be added to the paper list. The next successful refresh replaces the snapshot and clears the persisted error automatically.
+
+HTTP 402 means CMC API access requires activation or renewal; changing the Site's key or retrying more often does not reactivate the subscription. The owner must restore access in the [CMC billing portal](https://pro.coinmarketcap.com/account/plan). No automatic plan purchase, key rotation, or paid-access fallback is performed. After access is restored, the next request after the cooldown refreshes the shared snapshot. The external hourly status monitor can trigger this request even when no dashboard tab is open; the Worker itself does not run a background timer.
 
 ## Architecture
 
@@ -61,7 +65,7 @@ npm run dev
 
 Run a production build with `npm run build`.
 
-D1 binding `DB` and the generated `drizzle/` migrations are required. Deployment applies migrations before uploading the Worker. For local D1, apply the migration with Wrangler before requesting `/api/market`. Run `node --test tests/market-cache.test.mjs` for concurrency, cold-instance, outage, stale-response, lease-race, and recovery checks.
+D1 binding `DB` and all generated `drizzle/` migrations are required. Deployment applies migrations before uploading the Worker. For local D1, apply migrations with Wrangler before requesting `/api/market`. Run `node --test tests/market-cache.test.mjs` for concurrency, cold-instance, outage, stale-response, lease-race, error sanitization, rate-limit, and reactivation recovery checks.
 
 ## Hackathon track
 
